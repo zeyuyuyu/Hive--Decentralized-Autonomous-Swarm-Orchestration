@@ -1,62 +1,81 @@
-import os
-import time
+import asyncio
 import random
 import logging
-from typing import List, Tuple
-
-from .node import SwarmNode
+from typing import List, Dict, Tuple
 
 logger = logging.getLogger(__name__)
 
 class SwarmManager:
-    def __init__(self, num_nodes: int = 10, max_nodes: int = 50):
+    def __init__(self, num_nodes: int, replication_factor: int):
         self.num_nodes = num_nodes
-        self.max_nodes = max_nodes
-        self.nodes: List[SwarmNode] = []
-        self.initialize_swarm()
+        self.replication_factor = replication_factor
+        self.nodes: List[Node] = [Node(i) for i in range(num_nodes)]
+        self.data: Dict[str, List[Node]] = {}
 
-    def initialize_swarm(self):
-        for _ in range(self.num_nodes):
-            node = SwarmNode()
-            self.nodes.append(node)
-        logger.info(f"Initialized swarm with {len(self.nodes)} nodes.")
+    async def add_data(self, key: str, value: str):
+        nodes = self._select_nodes()
+        self.data[key] = nodes
+        for node in nodes:
+            await node.store_data(key, value)
 
-    def optimize_swarm(self):
+    async def get_data(self, key: str) -> str:
+        nodes = self.data[key]
+        responses = await asyncio.gather(*[node.fetch_data(key) for node in nodes])
+        value = max(set(responses), key=responses.count)
+        return value
+
+    async def remove_data(self, key: str):
+        nodes = self.data[key]
+        await asyncio.gather(*[node.delete_data(key) for node in nodes])
+        del self.data[key]
+
+    def _select_nodes(self) -> List[Node]:
+        available_nodes = [node for node in self.nodes if not node.is_failed()]
+        selected_nodes = random.sample(available_nodes, self.replication_factor)
+        return selected_nodes
+
+    async def monitor_nodes(self):
         while True:
-            # Evaluate current swarm performance
-            total_load = sum(node.load for node in self.nodes)
-            avg_load = total_load / len(self.nodes)
-            std_dev = (sum((node.load - avg_load) ** 2 for node in self.nodes) / len(self.nodes)) ** 0.5
+            await asyncio.sleep(60)
+            for node in self.nodes:
+                if node.is_failed():
+                    logger.warning(f"Node {node.id} has failed.")
+                    self._recover_node(node)
 
-            # Adjust swarm size based on load and variance
-            if std_dev > 0.2 * avg_load:
-                # High variance, scale up the swarm
-                self.scale_up()
-            elif len(self.nodes) > self.num_nodes and avg_load < 0.6 * self.nodes[0].capacity:
-                # Low load, scale down the swarm
-                self.scale_down()
+    def _recover_node(self, failed_node: 'Node'):
+        new_node = Node(failed_node.id)
+        self.nodes[failed_node.id] = new_node
+        for key, nodes in self.data.items():
+            if failed_node in nodes:
+                nodes.remove(failed_node)
+                nodes.append(new_node)
+                for node in nodes:
+                    asyncio.create_task(node.store_data(key, self.data[key][0].data[key]))
 
-            # Optimize node assignments
-            self.reassign_tasks()
+class Node:
+    def __init__(self, id: int):
+        self.id = id
+        self.data: Dict[str, str] = {}
+        self.is_failed_probability = 0.01
 
-            # Wait before the next optimization cycle
-            time.sleep(60)
+    async def store_data(self, key: str, value: str):
+        self.data[key] = value
+        if random.random() < self.is_failed_probability:
+            self.fail()
 
-    def scale_up(self):
-        if len(self.nodes) < self.max_nodes:
-            new_node = SwarmNode()
-            self.nodes.append(new_node)
-            logger.info(f"Scaled up the swarm, new size: {len(self.nodes)}")
+    async def fetch_data(self, key: str) -> str:
+        if key in self.data:
+            return self.data[key]
+        else:
+            raise KeyError(f"Key {key} not found.")
 
-    def scale_down(self):
-        if len(self.nodes) > self.num_nodes:
-            node_to_remove = random.choice(self.nodes)
-            self.nodes.remove(node_to_remove)
-            logger.info(f"Scaled down the swarm, new size: {len(self.nodes)}")
+    async def delete_data(self, key: str):
+        if key in self.data:
+            del self.data[key]
 
-    def reassign_tasks(self):
-        # Implement logic to reassign tasks to nodes based on load and capacity
-        pass
+    def is_failed(self) -> bool:
+        return random.random() < self.is_failed_probability
 
-    def run(self):
-        self.optimize_swarm()
+    def fail(self):
+        logger.warning(f"Node {self.id} has failed.")
+        self.is_failed_probability = 1.0
