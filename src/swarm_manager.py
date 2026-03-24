@@ -1,95 +1,62 @@
-import asyncio
-from typing import Dict, List, Optional
-from dataclasses import dataclass
-from enum import Enum
+import os
+import time
+import random
+import logging
+from typing import List, Tuple
 
-class NodeStatus(Enum):
-    HEALTHY = 'healthy'
-    DEGRADED = 'degraded'
-    OFFLINE = 'offline'
+from .node import SwarmNode
 
-@dataclass
-class SwarmNode:
-    id: str
-    status: NodeStatus
-    load: float
-    last_heartbeat: float
-    tasks: List[str]
+logger = logging.getLogger(__name__)
 
 class SwarmManager:
-    def __init__(self):
-        self.nodes: Dict[str, SwarmNode] = {}
-        self.task_queue: asyncio.Queue = asyncio.Queue()
-        self.load_threshold = 0.8
-        self.heartbeat_timeout = 30.0
+    def __init__(self, num_nodes: int = 10, max_nodes: int = 50):
+        self.num_nodes = num_nodes
+        self.max_nodes = max_nodes
+        self.nodes: List[SwarmNode] = []
+        self.initialize_swarm()
 
-    async def register_node(self, node_id: str) -> None:
-        self.nodes[node_id] = SwarmNode(
-            id=node_id,
-            status=NodeStatus.HEALTHY,
-            load=0.0,
-            last_heartbeat=asyncio.get_event_loop().time(),
-            tasks=[]
-        )
+    def initialize_swarm(self):
+        for _ in range(self.num_nodes):
+            node = SwarmNode()
+            self.nodes.append(node)
+        logger.info(f"Initialized swarm with {len(self.nodes)} nodes.")
 
-    async def heartbeat(self, node_id: str, load: float) -> None:
-        if node_id in self.nodes:
-            node = self.nodes[node_id]
-            node.last_heartbeat = asyncio.get_event_loop().time()
-            node.load = load
-            node.status = NodeStatus.HEALTHY if load < self.load_threshold else NodeStatus.DEGRADED
-
-    async def monitor_nodes(self) -> None:
+    def optimize_swarm(self):
         while True:
-            current_time = asyncio.get_event_loop().time()
-            for node_id, node in list(self.nodes.items()):
-                if current_time - node.last_heartbeat > self.heartbeat_timeout:
-                    node.status = NodeStatus.OFFLINE
-                    await self.rebalance_tasks(node_id)
-            await asyncio.sleep(5)
+            # Evaluate current swarm performance
+            total_load = sum(node.load for node in self.nodes)
+            avg_load = total_load / len(self.nodes)
+            std_dev = (sum((node.load - avg_load) ** 2 for node in self.nodes) / len(self.nodes)) ** 0.5
 
-    async def rebalance_tasks(self, failed_node_id: str) -> None:
-        failed_node = self.nodes[failed_node_id]
-        tasks_to_reassign = failed_node.tasks.copy()
-        failed_node.tasks.clear()
+            # Adjust swarm size based on load and variance
+            if std_dev > 0.2 * avg_load:
+                # High variance, scale up the swarm
+                self.scale_up()
+            elif len(self.nodes) > self.num_nodes and avg_load < 0.6 * self.nodes[0].capacity:
+                # Low load, scale down the swarm
+                self.scale_down()
 
-        healthy_nodes = [
-            node for node in self.nodes.values()
-            if node.status == NodeStatus.HEALTHY
-        ]
+            # Optimize node assignments
+            self.reassign_tasks()
 
-        if not healthy_nodes:
-            # Queue tasks for later reassignment
-            for task in tasks_to_reassign:
-                await self.task_queue.put(task)
-            return
+            # Wait before the next optimization cycle
+            time.sleep(60)
 
-        # Distribute tasks across healthy nodes
-        for task in tasks_to_reassign:
-            target_node = min(healthy_nodes, key=lambda n: n.load)
-            target_node.tasks.append(task)
-            target_node.load += 0.1  # Approximate load increase
+    def scale_up(self):
+        if len(self.nodes) < self.max_nodes:
+            new_node = SwarmNode()
+            self.nodes.append(new_node)
+            logger.info(f"Scaled up the swarm, new size: {len(self.nodes)}")
 
-    async def assign_task(self, task_id: str) -> Optional[str]:
-        healthy_nodes = [
-            node for node in self.nodes.values()
-            if node.status == NodeStatus.HEALTHY
-        ]
+    def scale_down(self):
+        if len(self.nodes) > self.num_nodes:
+            node_to_remove = random.choice(self.nodes)
+            self.nodes.remove(node_to_remove)
+            logger.info(f"Scaled down the swarm, new size: {len(self.nodes)}")
 
-        if not healthy_nodes:
-            await self.task_queue.put(task_id)
-            return None
+    def reassign_tasks(self):
+        # Implement logic to reassign tasks to nodes based on load and capacity
+        pass
 
-        target_node = min(healthy_nodes, key=lambda n: n.load)
-        target_node.tasks.append(task_id)
-        target_node.load += 0.1
-        return target_node.id
-
-    async def get_swarm_status(self) -> Dict:
-        return {
-            'total_nodes': len(self.nodes),
-            'healthy_nodes': len([n for n in self.nodes.values() if n.status == NodeStatus.HEALTHY]),
-            'degraded_nodes': len([n for n in self.nodes.values() if n.status == NodeStatus.DEGRADED]),
-            'offline_nodes': len([n for n in self.nodes.values() if n.status == NodeStatus.OFFLINE]),
-            'queued_tasks': self.task_queue.qsize()
-        }
+    def run(self):
+        self.optimize_swarm()
